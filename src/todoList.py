@@ -6,7 +6,7 @@ import json
 import functools
 from botocore.exceptions import ClientError
 
-
+@pytest.mark.lectura
 def get_table(dynamodb=None):
     if not dynamodb:
         URL = os.environ['ENDPOINT_OVERRIDE']
@@ -20,7 +20,7 @@ def get_table(dynamodb=None):
     table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
     return table
 
-
+@pytest.mark.lectura
 def get_item(key, dynamodb=None):
     table = get_table(dynamodb)
     try:
@@ -37,7 +37,7 @@ def get_item(key, dynamodb=None):
         if 'Item' in result:
             return result['Item']
 
-
+@pytest.mark.lectura
 def get_items(dynamodb=None):
     table = get_table(dynamodb)
     # fetch todo from the database
