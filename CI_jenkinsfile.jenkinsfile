@@ -10,7 +10,7 @@ pipeline {
                 sh 'whoami'
                 sh 'hostname'
                 sh 'echo $WORKSPACE'
-                stash includes: '**', name: 'todo-list-aws'
+                stash includes:  '**/*, .git/**/*', name: 'todo-list-aws'
             }
             post {
                 failure {
@@ -74,19 +74,46 @@ pipeline {
                         echo "Promoting version as RELEASE"
                         unstash name: 'todo-list-aws'
                         sh '''
-                            # Obtener el commit actual
+                            # Obtener el commit actual, lo suyo sería tener un control de versiones adecuado pero pongo esto para simplificarlo
                             COMMIT_HASH=$(git rev-parse --short HEAD)
+        
+                            # Configurar credenciales de Git
+                            git config user.name "Josu"
+                            git config user.email "josu@hodeia.digital"
+                            git remote set-url origin https://${GITHUB_TOKEN}@github.com/josu-hodeia/todo-list-aws.git
+        
                             # Crear archivo RELEASE con la versión
                             echo "Release version based on commit: $COMMIT_HASH" > RELEASE
                             git add RELEASE
                             git commit -m "Marking version as RELEASE - $COMMIT_HASH"
-                            git checkout master
-                            git merge develop
-                            git commit -am "Merged develop branch to master"
+        
+                            # Cambiar a master y hacer merge con develop si es necesario
+                            git checkout master || git checkout -b master
+                            git merge develop --no-edit
+        
+                            # Verificar si hay cambios pendientes antes de hacer commit
+                            if ! git diff --quiet; then
+                                git commit -am "Merged develop branch to master"
+                            fi
+        
+                            # Manejar archivos no rastreados en .gitignore si es necesario
+                            FILES="bandit.out flake8.out result-rest.xml"
+                            for FILE in $FILES; do
+                                if ! grep -qxF "$FILE" .gitignore; then
+                                    echo "$FILE" >> .gitignore
+                                    ADD_GITIGNORE=true
+                                fi
+                            done
+        
+                            # Si se agregó algo a .gitignore, hacer commit
+                            if [ "$ADD_GITIGNORE" = true ]; then
+                                git add .gitignore
+                                git commit -m "Added untracked files to .gitignore"
+                            fi
+        
+                            # Hacer push a master
                             git push origin master
                         '''
-
-
                     }
                 }
                 
