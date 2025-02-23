@@ -1,0 +1,132 @@
+pipeline {
+    agent none
+    environment {
+        GITHUB_TOKEN = credentials('AWS_ACCESS_REPO')
+    }
+    stages {
+        stage('Get code from repo') {
+            agent any
+            steps {
+                git branch: 'develop', url: "https://${env.GITHUB_TOKEN}@github.com/josu-hodeia/todo-list-aws.git"
+                sh 'whoami'
+                sh 'hostname'
+                sh 'echo $WORKSPACE'
+                stash includes: '**/*, .git/**/*', name: 'todo-list-aws'
+            }
+            post {
+                failure {
+                    error "Fallo de despliegue al clonar el repo."
+                }
+            }
+        }
+
+        stage('Static test') {
+            agent { label 'estatico' }
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                    sh '''
+                        set PYTHONPATH=$WORKSPACE
+                        python3 -m flake8 --exit-zero --format=pylint src > flake8.out
+                        python3 -m bandit --exit-zero -r . -f custom -o bandit.out --msg-template "{abspath}:{line}:[{test_id}]{msg}"
+                    '''
+                }
+            }
+        }
+
+        stage('SAM Deploy') {
+            agent any
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    unstash name: 'todo-list-aws'
+                    sh '''
+                        sam build
+                        sam deploy --config-env staging --no-fail-on-empty-changeset
+                    '''
+                    script {
+                        // Guardar la URL de la API en una variable de entorno
+                        env.STAGING_URL = sh(
+                            script: """
+                                aws cloudformation describe-stacks --stack-name todo-list-aws-staging --query 'Stacks[0].Outputs[?OutputKey==\\`BaseUrlApi\\`].OutputValue' --region us-east-1 --output text
+                            """,
+                            returnStdout: true
+                        ).trim()
+                    }
+                }
+            }
+        }
+
+        stage('Rest Test') {
+            agent { label 'rest' }
+            environment {
+                BASE_URL = "${env.STAGING_URL}"
+            }
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    echo 'Starting REST API Tests'
+                    sh 'whoami'
+                    sh 'hostname'
+                    sh 'echo $WORKSPACE'
+                    unstash name: 'todo-list-aws'
+                    sh '''
+                        export PYTHONPATH="$WORKSPACE"
+                        echo "Base URL: $BASE_URL"
+                        python -m pytest --junitxml=result-rest.xml test/integration/
+                    '''
+                    stash name: 'rest-res', includes: 'result-rest.xml'
+                }
+            }
+            post {
+                always {
+                    junit 'result-rest.xml'
+                }
+                failure {
+                    error "Fallo de REST API test."
+                }
+            }
+        }
+
+        stage('Promote') {
+            agent any
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    script {
+                        echo "Promoting version as RELEASE"
+                        unstash name: 'todo-list-aws'
+                        sh '''
+                            COMMIT_HASH=$(git rev-parse --short HEAD)
+                            git config user.name "Josu"
+                            git config user.email "josu@hodeia.digital"
+                            git remote set-url origin https://${GITHUB_TOKEN}@github.com/josu-hodeia/todo-list-aws.git
+                            echo "Release version based on commit: $COMMIT_HASH" > RELEASE
+                            git add RELEASE
+                            git commit -m "Marking version as RELEASE - $COMMIT_HASH"
+                            git checkout master || git checkout -b master
+                            git merge develop --no-edit
+                            if ! git diff --quiet; then
+                                git commit -am "Merged develop branch to master"
+                            fi
+                            FILES="bandit.out flake8.out result-rest.xml"
+                            for FILE in $FILES; do
+                                if ! grep -qxF "$FILE" .gitignore; then
+                                    echo "$FILE" >> .gitignore
+                                    ADD_GITIGNORE=true
+                                fi
+                            done
+                            if [ "$ADD_GITIGNORE" = true ]; then
+                                git add .gitignore
+                                git commit -m "Added untracked files to .gitignore"
+                            fi
+                            git push origin master
+                        '''
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
+```
