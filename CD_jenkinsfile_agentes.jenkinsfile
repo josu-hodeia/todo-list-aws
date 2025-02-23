@@ -1,0 +1,81 @@
+pipeline {
+    agent none
+    environment {
+        GITHUB_TOKEN = credentials('AWS_ACCESS_REPO')
+    }
+    stages {
+        stage('Get code from repo') {
+            agent any
+            steps {
+                git branch: 'master', url: "https://${env.GITHUB_TOKEN}@github.com/josu-hodeia/todo-list-aws.git"
+                sh 'whoami'
+                sh 'hostname'
+                sh 'echo $WORKSPACE'
+                stash includes: '**/*, .git/**/*', name: 'todo-list-aws'
+            }
+            post {
+                failure {
+                    error "Fallo de despliegue al clonar el repo."
+                }
+            }
+        }
+
+        stage('SAM Deploy') {
+            agent any
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    unstash name: 'todo-list-aws'
+                    sh '''
+                        sam build
+                        sam deploy --config-env production --no-fail-on-empty-changeset
+                    '''
+                    script {
+                        env.PRODUCTION_URL = sh(
+                            script: '''
+                                aws cloudformation describe-stacks --stack-name todo-list-aws-production \
+                                --query "Stacks[0].Outputs[?OutputKey==\\`BaseUrlApi\\`].OutputValue" \
+                                --region us-east-1 --output text
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                    }
+                }
+            }
+        }
+
+        stage('Rest Test') {
+            agent { label 'rest-tests' }
+            environment {
+                BASE_URL = "${env.PRODUCTION_URL}"
+            }
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    echo 'Starting REST API Tests'
+                    sh 'whoami'
+                    sh 'hostname'
+                    sh 'echo $WORKSPACE'
+                    unstash name: 'todo-list-aws'
+                    sh '''
+                        export PYTHONPATH="$WORKSPACE"
+                        echo "Base URL: $BASE_URL"
+                        python -m pytest -m lectura --junitxml=result-rest.xml test/integration/
+                    '''
+                    stash name: 'rest-res', includes: 'result-rest.xml'
+                }
+            }
+            post {
+                always {
+                    junit 'result-rest.xml'
+                }
+                failure {
+                    error "Fallo de REST API test."
+                }
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
